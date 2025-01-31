@@ -112,75 +112,93 @@ class DefinitionManager(object):
         return closured
 
     def complete_definitions(self):
-        # THE MOST expensive part of this tool's process
-        # TODO: IMPROVE COMPLEXITY
+        """Complete all definitions by propagating pointer relationships.
+        This is an optimized version that tracks changes and uses sets for better performance."""
         def update_pointsto_args(pointsto_args, arg, name):
-            changed_something = False
             if arg == pointsto_args:
                 return False
+
+            changed = False
+            # Convert to sets for faster operations
+            arg_set = set(arg)
+
             for pointsto_arg in pointsto_args:
-                if not self.defs.get(pointsto_arg, None):
+                # Cache definition lookup
+                pointsto_def = self.defs.get(pointsto_arg)
+                if not pointsto_def or pointsto_arg == name:
                     continue
-                if pointsto_arg == name:
-                    continue
-                pointsto_arg_def = self.defs[pointsto_arg].get_name_pointer()
+
+                pointsto_arg_def = pointsto_def.get_name_pointer()
                 if pointsto_arg_def == pointsto_args:
                     continue
 
-                # sometimes we may end up with a cycle
-                if pointsto_arg in arg:
-                    arg.remove(pointsto_arg)
+                # Get existing items after we have pointsto_arg_def
+                existing = set(pointsto_arg_def.get())
+                # Cache definition lookup
+                pointsto_def = self.defs.get(pointsto_arg)
+                if not pointsto_def or pointsto_arg == name:
+                    continue
 
-                for item in arg:
-                    if item not in pointsto_arg_def.get():
-                        if self.defs.get(item, None) is not None:
-                            changed_something = True
-                    # HACK: this check shouldn't be needed
-                    # if we remove this the following breaks:
-                    # x = lambda x: x + 1
-                    # x(1)
-                    # since on line 184 we don't discriminate between
-                    # literal values and name values
-                    if not self.defs.get(item, None):
-                        continue
-                    pointsto_arg_def.add(item)
-            return changed_something
+                pointsto_arg_def = pointsto_def.get_name_pointer()
+                if pointsto_arg_def == pointsto_args:
+                    continue
 
-        for i in range(len(self.defs)):
-            changed_something = False
-            for ns, current_def in self.defs.items():
-                # the name pointer of the definition we're currently iterating
+                # Remove cycles efficiently using set difference
+                arg_set.discard(pointsto_arg)
+
+                # Find new items to add
+                new_items = {x for x in arg_set if x in self.defs}
+                new_items -= existing
+
+                if new_items:
+                    changed = True
+                    for item in new_items:
+                        pointsto_arg_def.add(item)
+
+            return changed
+
+        # Track which definitions have changed
+        changed_defs = set(self.defs.keys())
+        
+        while changed_defs:
+            new_changes = set()
+            
+            for ns in changed_defs:
+                current_def = self.defs[ns]
                 current_name_pointer = current_def.get_name_pointer()
-                # iterate the names the current definition points to items
-                # for name in current_name_pointer.get():
-                for name in current_name_pointer.get().copy():
-                    # get the name pointer of the points to name
-                    if not self.defs.get(name, None):
-                        continue
-                    if name == ns:
+                
+                # Cache the names to avoid modification during iteration
+                names = set(current_name_pointer.get())
+                
+                for name in names:
+                    pointsto_def = self.defs.get(name)
+                    if not pointsto_def or name == ns:
                         continue
 
-                    pointsto_name_pointer = self.defs[name].get_name_pointer()
-                    # iterate the arguments of the definition
-                    # we're currently iterating
+                    pointsto_name_pointer = pointsto_def.get_name_pointer()
+                    
+                    # Process arguments more efficiently
                     for arg_name, arg in current_name_pointer.get_args().items():
                         pos = current_name_pointer.get_pos_of_name(arg_name)
+                        
                         if pos is not None:
                             pointsto_args = pointsto_name_pointer.get_pos_arg(pos)
                             if not pointsto_args:
                                 pointsto_name_pointer.add_pos_arg(pos, None, arg)
+                                new_changes.add(name)
                                 continue
                         else:
                             pointsto_args = pointsto_name_pointer.get_arg(arg_name)
                             if not pointsto_args:
                                 pointsto_name_pointer.add_arg(arg_name, arg)
+                                new_changes.add(name)
                                 continue
-                        changed_something = changed_something or update_pointsto_args(
-                            pointsto_args, arg, current_def.get_ns()
-                        )
-
-            if not changed_something:
-                break
+                                
+                        if update_pointsto_args(pointsto_args, arg, current_def.get_ns()):
+                            new_changes.add(name)
+                            
+            # Only continue if we found new changes
+            changed_defs = new_changes
 
 
 class Definition(object):
